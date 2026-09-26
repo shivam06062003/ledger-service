@@ -1,0 +1,44 @@
+x-app-env: &app-env
+  DATABASE_URL: postgresql+asyncpg://ledger:ledger@db:5432/ledger
+  ENVIRONMENT: local
+  LOG_LEVEL: INFO
+  LOG_JSON: "true"
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ledger
+      POSTGRES_PASSWORD: ledger
+      POSTGRES_DB: ledger
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ledger -d ledger"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  # One-off job: apply migrations, then exit. The API only starts after it
+  # succeeds, so the app never runs against an out-of-date schema.
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    environment: *app-env
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    build: .
+    environment: *app-env
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
