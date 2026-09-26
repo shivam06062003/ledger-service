@@ -16,10 +16,12 @@ from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.db import SessionLocal
+from app.core.metrics import RATE_LIMITED
+from app.core.rate_limit import get_rate_limiter
 from app.schemas.api_key import Scope
 from app.services import api_keys as api_key_service
 from app.services.api_keys import Principal
-from app.services.errors import PermissionDenied, Unauthenticated
+from app.services.errors import PermissionDenied, RateLimited, Unauthenticated
 
 # auto_error=False: we raise our own error so it uses the standard envelope.
 _bearer = HTTPBearer(auto_error=False, description="API key, sent as `Bearer ldg_...`")
@@ -35,6 +37,13 @@ async def get_principal(
     async with SessionLocal() as session:
         principal = await api_key_service.authenticate(session, credentials.credentials)
     structlog.contextvars.bind_contextvars(api_key_id=str(principal.api_key_id))
+
+    # Limited per key, after authentication: one noisy client can't starve the
+    # rest. (Unauthenticated floods are the job of the edge/load balancer.)
+    limit = await get_rate_limiter().hit(str(principal.api_key_id))
+    if not limit.allowed:
+        RATE_LIMITED.inc()
+        raise RateLimited(limit.retry_after_seconds)
     return principal
 
 

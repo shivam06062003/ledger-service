@@ -4,9 +4,8 @@ import uuid
 from typing import Any
 
 from httpx import AsyncClient
-from sqlalchemy import text
 
-from app.core.db import engine
+from app.services.reconciliation import reconcile
 
 
 async def create_account(
@@ -68,28 +67,7 @@ async def get_balance(client: AsyncClient, account_id: str) -> int:
 
 
 async def assert_ledger_consistent() -> None:
-    """The three invariants of a double-entry ledger. These are the same checks
-    a production reconciliation job would run."""
-    async with engine.connect() as conn:
-        # 1. Money is never created or destroyed.
-        total = await conn.scalar(text("SELECT COALESCE(SUM(amount), 0) FROM entries"))
-        assert total == 0, f"ledger does not sum to zero: {total}"
-
-        # 2. Every transfer balances on its own.
-        unbalanced = await conn.execute(
-            text("SELECT transfer_id FROM entries GROUP BY transfer_id HAVING SUM(amount) <> 0")
-        )
-        assert unbalanced.all() == []
-
-        # 3. Cached balances equal the sum of each account's entries.
-        drifted = await conn.execute(
-            text(
-                """
-                SELECT a.id, a.balance, COALESCE(SUM(e.amount), 0) AS entries_total
-                FROM accounts a LEFT JOIN entries e ON e.account_id = a.id
-                GROUP BY a.id, a.balance
-                HAVING a.balance <> COALESCE(SUM(e.amount), 0)
-                """
-            )
-        )
-        assert drifted.all() == []
+    """The three invariants of a double-entry ledger, checked by the same code
+    the scheduled reconciliation job runs."""
+    report = await reconcile()
+    assert report.ok, report

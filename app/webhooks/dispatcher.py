@@ -15,6 +15,7 @@ deduplicate on the event ID (sent in the payload and the Ledger-Event-Id header)
 import asyncio
 import json
 import random
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
@@ -22,11 +23,15 @@ from typing import Any
 
 import httpx
 import structlog
+from opentelemetry import propagate
+from opentelemetry.trace import SpanKind, Status, StatusCode
 from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.db import SessionLocal
+from app.core.metrics import OUTBOX_RELAYED, WEBHOOK_ATTEMPTS, WEBHOOK_DURATION
+from app.core.tracing import context_from, tracer
 from app.models import WebhookDelivery
 from app.repositories import outbox as outbox_repo
 from app.repositories import webhooks as webhooks_repo
@@ -99,11 +104,33 @@ async def relay_outbox(config: DispatchConfig) -> int:
                         session, WebhookDelivery(event_id=event.id, endpoint_id=endpoint.id)
                     )
             event.published_at = func.now()
+    OUTBOX_RELAYED.inc(len(events))
     logger.info("outbox_relayed", events=len(events))
     return len(events)
 
 
 async def send(http: httpx.AsyncClient, delivery: ClaimedDelivery) -> DeliveryOutcome:
+    # Resume the trace of the API request that created the event.
+    with tracer.start_as_current_span(
+        f"webhook deliver {delivery.event_type}",
+        context=context_from(delivery.trace_context),
+        kind=SpanKind.CONSUMER,
+        attributes={
+            "ledger.event_id": str(delivery.event_id),
+            "ledger.delivery_id": str(delivery.id),
+            "ledger.delivery_attempt": delivery.attempts,
+            "url.full": delivery.url,
+        },
+    ) as span:
+        outcome = await _post(http, delivery)
+        if outcome.status_code is not None:
+            span.set_attribute("http.response.status_code", outcome.status_code)
+        if not outcome.succeeded:
+            span.set_status(Status(StatusCode.ERROR, outcome.error))
+        return outcome
+
+
+async def _post(http: httpx.AsyncClient, delivery: ClaimedDelivery) -> DeliveryOutcome:
     body = build_body(delivery)
     headers = {
         "Content-Type": "application/json",
@@ -113,12 +140,17 @@ async def send(http: httpx.AsyncClient, delivery: ClaimedDelivery) -> DeliveryOu
         "Ledger-Delivery-Attempt": str(delivery.attempts),
         SIGNATURE_HEADER: sign(delivery.secret, body),
     }
+    # Forward traceparent so the subscriber can continue the trace too.
+    propagate.inject(headers)
+    start = time.perf_counter()
     try:
         # Redirects are not followed: a 3xx counts as a failure. Following them
         # could send signed payloads somewhere the subscriber never registered.
         response = await http.post(delivery.url, content=body, headers=headers)
     except httpx.HTTPError as exc:
         return DeliveryOutcome(False, None, f"{type(exc).__name__}: {exc}")
+    finally:
+        WEBHOOK_DURATION.observe(time.perf_counter() - start)
     if response.is_success:
         return DeliveryOutcome(True, response.status_code)
     return DeliveryOutcome(False, response.status_code, f"HTTP {response.status_code}")
@@ -157,6 +189,7 @@ async def _record(
     if outcome.succeeded:
         assert outcome.status_code is not None
         await webhooks_repo.mark_succeeded(session, delivery.id, outcome.status_code)
+        WEBHOOK_ATTEMPTS.labels("succeeded").inc()
         log.info("webhook_delivered")
         return
 
@@ -165,6 +198,7 @@ async def _record(
         await webhooks_repo.mark_attempt_failed(
             session, delivery.id, status_code=outcome.status_code, error=error, retry_in=None
         )
+        WEBHOOK_ATTEMPTS.labels("dead_lettered").inc()
         log.warning("webhook_dead_lettered", error=error)
         return
 
@@ -178,6 +212,7 @@ async def _record(
         error=error,
         retry_in=timedelta(seconds=delay),
     )
+    WEBHOOK_ATTEMPTS.labels("retry_scheduled").inc()
     log.info("webhook_retry_scheduled", error=error, retry_in_seconds=round(delay, 1))
 
 

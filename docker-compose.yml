@@ -1,8 +1,18 @@
 x-app-env: &app-env
   DATABASE_URL: postgresql+asyncpg://ledger:ledger@db:5432/ledger
+  REDIS_URL: redis://redis:6379/0
   ENVIRONMENT: local
   LOG_LEVEL: INFO
   LOG_JSON: "true"
+  # Overridable from the shell, e.g. RATE_LIMIT_ENABLED=false for load tests.
+  RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+  RATE_LIMIT_PER_SECOND: ${RATE_LIMIT_PER_SECOND:-50}
+  RATE_LIMIT_BURST: ${RATE_LIMIT_BURST:-100}
+  DB_POOL_SIZE: ${DB_POOL_SIZE:-5}
+  DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-10}
+  # Tracing is on when the observability profile is up (see `make observability`).
+  OTEL_ENABLED: ${OTEL_ENABLED:-false}
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
 
 services:
   db:
@@ -21,6 +31,16 @@ services:
       timeout: 3s
       retries: 15
 
+  redis:
+    image: redis:7.4-alpine
+    ports:
+      - "6380:6379"   # 6380 on the host: avoids clashing with a local Redis on 6379
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
   # One-off job: apply migrations, then exit. The API only starts after it
   # succeeds, so the app never runs against an out-of-date schema.
   migrate:
@@ -34,20 +54,30 @@ services:
   api:
     build: .
     restart: unless-stopped
-    environment: *app-env
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: ledger-api
+      # One uvicorn process per core we want to use (each has its own DB pool:
+      # 4 x (5 + 10 overflow) = 60 connections max, under Postgres's 100).
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-4}
+      PROMETHEUS_MULTIPROC_DIR: /tmp/prometheus
     ports:
       - "8000:8000"
     depends_on:
       migrate:
         condition: service_completed_successfully
+      redis:
+        condition: service_healthy
 
-  # Relays the outbox and delivers webhooks. Scale with
+  # Relays the outbox, delivers webhooks, runs scheduled jobs. Scale with
   # `docker compose up -d --scale worker=3`; replicas never duplicate work.
   worker:
     build: .
     command: ["python", "-m", "app.worker"]
     restart: unless-stopped
-    environment: *app-env
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: ledger-worker
     # The API's HTTP health check doesn't apply here. Instead: "has the loop
     # touched its heartbeat file in the last 30 seconds?"
     healthcheck:
@@ -76,6 +106,42 @@ services:
       - ./examples:/app/examples:ro
     healthcheck:
       disable: true
+
+  # ---- Observability (optional): `make observability` ----------------------
+
+  prometheus:
+    profiles: [observability]
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.enable-lifecycle
+    volumes:
+      - ./observability/prometheus:/etc/prometheus:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    profiles: [observability]
+    image: grafana/grafana:12.1.1
+    environment:
+      # Local demo only: anonymous admin, no login screen.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3001:3000"   # 3001 on the host: 3000 is commonly taken by dev servers
+    depends_on:
+      - prometheus
+
+  jaeger:
+    profiles: [observability]
+    image: jaegertracing/jaeger:2.9.0
+    ports:
+      - "16686:16686"   # UI
+      - "4318:4318"     # OTLP over HTTP
 
 volumes:
   pgdata:

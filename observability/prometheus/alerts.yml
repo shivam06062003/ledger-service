@@ -1,0 +1,57 @@
+# Alert rules. Without Alertmanager they show up in Prometheus at /alerts;
+# in production Alertmanager would route them to Slack/PagerDuty.
+groups:
+  - name: ledger
+    rules:
+      - alert: LedgerReconciliationFailed
+        expr: max(sum by (instance) (ledger_reconciliation_discrepancies)) > 0
+        labels: {severity: critical}
+        annotations:
+          summary: Reconciliation found ledger discrepancies. Money may be wrong.
+          runbook: Run `python -m app.cli reconcile` for the affected IDs; freeze writes if drift grows.
+
+      - alert: LedgerReconciliationStale
+        expr: time() - max(ledger_reconciliation_last_run_timestamp_seconds) > 900
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: Reconciliation has not completed in 15 minutes (worker down or job failing).
+
+      - alert: HighServerErrorRate
+        expr: |
+          sum(rate(http_requests_total{status=~"5.."}[5m]))
+            / sum(rate(http_requests_total[5m])) > 0.01
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: More than 1% of API requests are failing with 5xx.
+
+      - alert: SlowTransfers
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(http_request_duration_seconds_bucket{route="/v1/transfers", method="POST"}[5m]))
+          ) > 0.5
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: p95 transfer latency is above 500ms.
+
+      - alert: WebhooksFallingBehind
+        expr: max(ledger_webhook_oldest_pending_delivery_age_seconds) > 600
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: The oldest pending webhook is over 10 minutes old (subscriber down or workers saturated).
+
+      - alert: WebhookDeadLetters
+        expr: max(ledger_webhook_deliveries_dead_lettered) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: Webhook deliveries exhausted their retries. Inspect GET /v1/webhook-deliveries?status=failed.
+
+      - alert: RateLimiterDown
+        expr: sum(rate(ledger_rate_limiter_errors_total[5m])) > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: Rate limiter cannot reach Redis. Requests are allowed through unthrottled (fail-open).

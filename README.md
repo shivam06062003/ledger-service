@@ -6,7 +6,7 @@ A payments ledger API built on **double-entry bookkeeping**. Money is never
 created or destroyed, only moved between accounts. Every transfer is atomic,
 and correctness is enforced both in the application and in PostgreSQL itself.
 
-> **Status:** Phase 4 (events and webhooks) complete. See [Roadmap](#roadmap).
+> **Status:** All five phases complete. See [Roadmap](#roadmap) and [load test results](#load-test-results).
 
 ## Architecture
 
@@ -20,6 +20,9 @@ flowchart LR
     S -- "ONE transaction:<br/>idempotency key, row locks,<br/>transfer + entries, outbox event" --> DB[(PostgreSQL)]
     W[Worker<br/>replicas] -- "FOR UPDATE SKIP LOCKED<br/>fan-out + leased deliveries" --> DB
     W -- "HMAC-signed POST<br/>retries, backoff, DLQ" --> R[Subscriber<br/>webhook endpoint]
+    API -- "token bucket (Lua)" --> RD[(Redis)]
+    API & W -. "metrics" .-> P[Prometheus → Grafana]
+    API & W -. "traces (context carried via outbox)" .-> J[Jaeger]
 ```
 
 ## Highlights
@@ -32,13 +35,17 @@ flowchart LR
 - **Safe retries (idempotency keys).** Every transfer requires an `Idempotency-Key`. The key is claimed in the same transaction as the transfer, so 20 identical concurrent requests produce exactly one transfer; the other 19 get the original response replayed. Failed requests leave no trace and can be retried.
 - **Scoped API keys.** Each calling service gets a key with least-privilege scopes. Keys are stored only as SHA-256 hashes, can be revoked instantly, and every transfer records the key that initiated it.
 - **Reliable webhooks (transactional outbox).** Events are written in the same transaction as the transfer, so none are lost and none are sent for rolled-back transfers. A separate worker delivers them with HMAC signatures, exponential backoff with jitter, leases (no transaction held during HTTP calls), and a dead-letter queue with manual re-queue. Workers scale horizontally with `FOR UPDATE SKIP LOCKED`. Tests confirm that removing it causes deadlocks.
+- **Observable end to end.** Prometheus metrics with cardinality-safe route labels, a provisioned Grafana dashboard and 7 alert rules (validated in CI). OpenTelemetry traces **cross the async boundary**: the trace context is stored on the outbox row, so one trace spans API request → SQL → worker → webhook call. Log lines carry `trace_id`.
+- **Per-key rate limiting.** A token bucket implemented as one atomic Redis Lua script (50 concurrent hits at burst 5 → exactly 5 allowed). It uses Redis's clock, and fails open if Redis is down.
+- **Continuous reconciliation.** A scheduled job re-verifies all ledger invariants in one `REPEATABLE READ` snapshot, publishes a discrepancy gauge that alerts, and runs once per interval across all worker replicas. Batched retention jobs keep tables bounded.
+- **Load tested, bottlenecks diagnosed.** About 80k transfers under concurrent load with 0 errors and 0 reconciliation discrepancies. Tail latency was traced to connection-pool queueing, after ruling out two other hypotheses ([results](#load-test-results)).
 - **Keyset pagination.** Statements page through `(created_at, id)` cursors backed by a matching index, so page 1,000 is as fast as page 1.
 - **Auditable by design:** cached balances for fast reads, immutable entries with `balance_after` for statements, and reconciliation checks that verify the two always agree.
 - **Production basics:** Docker Compose, Alembic migrations with round-trip checks in CI, structured JSON logs with request IDs, liveness and readiness probes, strict typing.
 
 ## Tech stack
 
-FastAPI · PostgreSQL 17 · async SQLAlchemy 2.0 · Alembic · structlog · pytest · Docker Compose · GitHub Actions
+FastAPI · PostgreSQL 17 · async SQLAlchemy 2.0 · Alembic · Redis · Prometheus · Grafana · OpenTelemetry · Jaeger · k6 · structlog · pytest · Docker Compose · GitHub Actions
 
 ## Quick start
 
@@ -88,12 +95,26 @@ docker compose logs -f webhook-receiver
 
 Stop the receiver (`docker compose stop webhook-receiver`), make another transfer, and watch the worker schedule retries (`make worker-logs`). Start the receiver again and the delivery succeeds on the next attempt.
 
+### Observability
+
+```bash
+make observability      # full stack + Prometheus, Grafana, Jaeger, with tracing on
+```
+
+| Tool | URL | What to look at |
+|---|---|---|
+| Grafana | http://localhost:3001 | **Ledger / Ledger Service** dashboard: throughput, latency percentiles, rejections, webhook queues, reconciliation |
+| Prometheus | http://localhost:9090/alerts | The 7 alert rules and their state |
+| Jaeger | http://localhost:16686 | Service `ledger-api`, operation `POST /v1/transfers`: one trace covers the API, SQL, the worker and the webhook |
+
+Operator commands: `make reconcile` (exit code 1 on any discrepancy), `make purge-idempotency`, `make worker-logs`.
+
 ### Local development (app outside Docker)
 
 ```bash
 cp .env.example .env
 make install        # .venv with app + dev tools
-make db             # Postgres only
+make db             # Postgres + Redis
 make migrate
 make check          # lint + typecheck + tests (same as CI)
 .venv/bin/uvicorn app.main:app --reload
@@ -119,6 +140,9 @@ All `/v1` endpoints require `Authorization: Bearer <api key>`.
 | `DELETE` | `/v1/webhook-endpoints/{id}` | `admin` | Disable an endpoint (history kept) |
 | `GET` | `/v1/webhook-deliveries` | `admin` | Delivery log; `?status=failed` is the dead-letter queue |
 | `POST` | `/v1/webhook-deliveries/{id}/retry` | `admin` | Re-queue a dead-lettered delivery |
+| `GET` | `/metrics` | none (internal network) | Prometheus metrics |
+
+Requests over the per-key limit get `429` with `Retry-After` (default: bursts of 100, 50/s sustained).
 
 ### Webhook events
 
@@ -137,6 +161,24 @@ Errors use one consistent format:
 {"error": {"code": "insufficient_funds", "message": "Account … has insufficient funds"}}
 ```
 
+## Load test results
+
+These come from k6 on an **Apple M1 laptop** (Docker: 8 vCPU, 4 GB). Everything, including the load generator, shares those cores. The API runs 4 processes; tracing and rate limiting were off; each transfer also fired a live webhook.
+
+| Scenario | Throughput | Latency | Errors |
+|---|---|---|---|
+| Transfers between random accounts, max | **212–243 /s** | p95 511–795 ms (saturated) | 0 |
+| Transfers between random accounts, fixed 100/s | 100 /s | **p50 ≈ 10 ms**, p95 366–674 ms | 0 |
+| All transfers from **one hot account**, max | **~112 /s** | p95 ≈ 1.2 s (saturated) | 0 |
+| One hot account, fixed 60/s | 60 /s | **p95 188 ms** | 0 |
+
+After about 80,000 transfers, `make reconcile` reports **0 discrepancies**. [ADR 0005](docs/adr/0005-observability-rate-limiting-and-operations.md#6-load-test-results) documents the bottleneck investigation: single process CPU-bound → whole VM saturated. It also covers two rejected hypotheses (fsync, pool churn) and how tracing pinned the tail on connection-pool waits. Reproduce with:
+
+```bash
+make loadtest scenario=spread vus=50 duration=30s
+make loadtest scenario=hot rate=60 duration=30s
+```
+
 ## Project layout
 
 ```
@@ -149,9 +191,13 @@ app/
   core/           Config, logging, DB engine/session
   webhooks/       Outbox relay, delivery dispatcher, HMAC signing
   worker.py       Background worker process (python -m app.worker)
+  jobs.py         Scheduled jobs (reconciliation, retention) + replica coordination
   cli.py          Operator commands (issue API keys, purge idempotency keys)
 migrations/       Alembic migrations (including hand-written triggers)
 examples/         Example webhook receiver (signature verification + dedup)
+observability/    Prometheus config + alert rules, Grafana provisioning + dashboard
+loadtest/         k6 load test (spread vs hot-account scenarios)
+scripts/          Container entrypoint (multi-process uvicorn)
 tests/            API, auth, idempotency, webhook, concurrency and DB-integrity tests
 docs/adr/         Architecture Decision Records
 ```
@@ -162,7 +208,7 @@ docs/adr/         Architecture Decision Records
 - [x] **Phase 2: Core ledger.** Accounts, double-entry transfers, row locking, database-enforced invariants, concurrency tests.
 - [x] **Phase 3: API hardening.** Idempotency keys, API-key auth with scopes, cursor pagination.
 - [x] **Phase 4: Events.** Transactional outbox, relay worker, signed webhooks with retries and a dead-letter queue.
-- [ ] **Phase 5: Operability.** Prometheus metrics, OpenTelemetry tracing, rate limiting, load tests, scheduled reconciliation and retention jobs.
+- [x] **Phase 5: Operability.** Prometheus metrics, OpenTelemetry tracing, rate limiting, load tests, scheduled reconciliation and retention jobs.
 
 ## Design decisions
 
@@ -170,3 +216,4 @@ docs/adr/         Architecture Decision Records
 - [ADR 0002: Ledger model and concurrency control](docs/adr/0002-ledger-model-and-concurrency.md)
 - [ADR 0003: API keys, idempotency and pagination](docs/adr/0003-api-keys-idempotency-pagination.md)
 - [ADR 0004: Transactional outbox and webhook delivery](docs/adr/0004-outbox-and-webhooks.md)
+- [ADR 0005: Observability, rate limiting and operations](docs/adr/0005-observability-rate-limiting-and-operations.md)

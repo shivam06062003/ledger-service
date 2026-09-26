@@ -36,6 +36,23 @@ class Settings(BaseSettings):
     worker_batch_size: int = 50
     worker_poll_interval_seconds: float = 1.0
     worker_heartbeat_path: str = "/tmp/worker-heartbeat"
+    worker_metrics_port: int = 9100
+
+    # Rate limiting (token bucket per API key, stored in Redis)
+    redis_url: str = "redis://localhost:6380/0"
+    rate_limit_enabled: bool = True
+    rate_limit_per_second: float = 50.0
+    rate_limit_burst: int = 100
+
+    # Scheduled jobs (run by the worker; once per interval across all replicas)
+    reconciliation_interval_seconds: int = 300
+    retention_job_interval_seconds: int = 3600
+    webhook_history_retention_days: int = 30
+
+    # Tracing (OpenTelemetry, exported over OTLP/HTTP, e.g. to Jaeger)
+    otel_enabled: bool = False
+    otel_service_name: str = "ledger-api"
+    otel_exporter_otlp_endpoint: str = "http://localhost:4318/v1/traces"
 
 
 @lru_cache

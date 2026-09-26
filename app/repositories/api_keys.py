@@ -16,4 +16,4 @@ async def get(session: AsyncSession, api_key_id: uuid.UUID) -> ApiKey | None:
 
 async def get_active_by_hash(session: AsyncSession, key_hash: str) -> ApiKey | None:
     stmt = select(ApiKey).where(ApiKey.key_hash == key_hash, ApiKey.revoked_at.is_(None))
-    return await session.scalar(stmt)
+    return (await session.scalars(stmt)).one_or_none()

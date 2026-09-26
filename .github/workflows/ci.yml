@@ -37,6 +37,15 @@ jobs:
           --health-interval 2s
           --health-timeout 3s
           --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6380:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
     env:
       DATABASE_URL: postgresql+asyncpg://ledger:ledger@localhost:5432/ledger
       ENVIRONMENT: test
@@ -53,6 +62,16 @@ jobs:
       - name: Models match migrations (no un-migrated model changes)
         run: alembic check
       - run: pytest -v
+
+  observability-config:
+    name: Validate Prometheus config & alerts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: >-
+          docker run --rm --entrypoint promtool
+          -v "$PWD/observability/prometheus:/p:ro"
+          prom/prometheus:v3.5.0 check config /p/prometheus.yml
 
   docker:
     name: Docker build

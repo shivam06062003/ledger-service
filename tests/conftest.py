@@ -13,6 +13,11 @@ TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL", "postgresql+asyncpg://ledger:ledger@localhost:5432/ledger_test"
 )
 os.environ["DATABASE_URL"] = TEST_DATABASE_URL
+# Redis DB 15, kept apart from local dev data. Limits are set high so ordinary
+# tests never trip them; test_rate_limit.py builds its own strict limiter.
+os.environ["REDIS_URL"] = os.environ.get("TEST_REDIS_URL", "redis://localhost:6380/15")
+os.environ["RATE_LIMIT_PER_SECOND"] = "100000"
+os.environ["RATE_LIMIT_BURST"] = "100000"
 
 import asyncpg  # noqa: E402
 from alembic import command  # noqa: E402
@@ -65,7 +70,7 @@ async def clean_tables() -> None:
     async with engine.begin() as conn:
         await conn.execute(
             text(
-                "TRUNCATE webhook_deliveries, webhook_endpoints, outbox_events, "
+                "TRUNCATE webhook_deliveries, webhook_endpoints, outbox_events, scheduled_jobs, "
                 "idempotency_keys, entries, transfers, accounts, api_keys"
             )
         )

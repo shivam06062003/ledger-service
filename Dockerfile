@@ -26,6 +26,7 @@ COPY --from=builder /opt/venv /opt/venv
 WORKDIR /app
 COPY alembic.ini ./
 COPY migrations ./migrations
+COPY scripts/serve.sh ./serve.sh
 
 USER appuser
 EXPOSE 8000
@@ -33,6 +34,6 @@ EXPOSE 8000
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live')"
 
-# Our middleware logs each request as structured JSON, so uvicorn's own
-# plain-text access log would just be duplicate noise.
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+# serve.sh starts uvicorn (one process per $WEB_CONCURRENCY) without its
+# access log: our middleware already logs each request as structured JSON.
+CMD ["./serve.sh"]

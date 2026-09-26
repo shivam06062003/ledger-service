@@ -1,5 +1,6 @@
 import secrets
 import uuid
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -79,3 +80,30 @@ async def retry_delivery(session: AsyncSession, delivery_id: uuid.UUID) -> Webho
         await session.flush()
         await session.refresh(delivery)
     return delivery
+
+
+async def purge_history(
+    session: AsyncSession, retention: timedelta, *, batch_size: int = 5_000
+) -> tuple[int, int]:
+    """Delete succeeded deliveries and fully-delivered events older than the
+    retention window, in batches. Pending and dead-lettered data is kept.
+    Returns (deliveries deleted, events deleted)."""
+    cutoff = datetime.now(UTC) - retention
+    deleted_deliveries = deleted_events = 0
+    while True:
+        async with session.begin():
+            n = await webhooks_repo.delete_succeeded_deliveries_before(
+                session, cutoff, batch_size=batch_size
+            )
+        deleted_deliveries += n
+        if n < batch_size:
+            break
+    while True:
+        async with session.begin():
+            n = await webhooks_repo.delete_published_events_before(
+                session, cutoff, batch_size=batch_size
+            )
+        deleted_events += n
+        if n < batch_size:
+            break
+    return deleted_deliveries, deleted_events

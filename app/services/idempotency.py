@@ -31,6 +31,7 @@ import structlog
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.metrics import IDEMPOTENT_REPLAYS
 from app.repositories import idempotency_keys as idempotency_repo
 from app.services.errors import IdempotencyKeyReused
 
@@ -83,10 +84,11 @@ async def execute(
                 session,
                 api_key_id=request.api_key_id,
                 key=request.key,
-                status_code=status_code,
+                status_code=int(status_code),
                 body=body,
             )
-    return IdempotentResult(status_code=status_code, body=body, replayed=False)
+    # int(): callers may pass an HTTPStatus enum; store and log the plain number.
+    return IdempotentResult(status_code=int(status_code), body=body, replayed=False)
 
 
 async def _claim(session: AsyncSession, request: IdempotencyRequest) -> IdempotentResult | None:
@@ -109,6 +111,7 @@ async def _claim(session: AsyncSession, request: IdempotencyRequest) -> Idempote
     if existing.request_hash != request.request_hash:
         raise IdempotencyKeyReused()
 
+    IDEMPOTENT_REPLAYS.inc()
     logger.info("idempotent_replay", idempotency_key=request.key)
     return IdempotentResult(
         status_code=existing.status_code, body=existing.response_body, replayed=True

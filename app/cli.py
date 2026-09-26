@@ -13,7 +13,8 @@ from app.core.config import get_settings
 from app.core.db import SessionLocal, engine
 from app.schemas.api_key import ApiKeyCreate, Scope
 from app.services import api_keys as api_key_service
-from app.services import idempotency
+from app.services import idempotency, reconciliation
+from app.services import webhooks as webhook_service
 
 
 async def _create_api_key(name: str, scopes: list[Scope]) -> None:
@@ -33,12 +34,40 @@ async def _purge_idempotency_keys() -> None:
     print(f"Deleted {deleted} idempotency keys older than {retention}", file=sys.stderr)
 
 
-async def _run(args: argparse.Namespace) -> None:
+async def _purge_webhook_history() -> None:
+    retention = timedelta(days=get_settings().webhook_history_retention_days)
+    async with SessionLocal() as session:
+        deliveries, events = await webhook_service.purge_history(session, retention)
+    print(
+        f"Deleted {deliveries} deliveries and {events} events older than {retention}",
+        file=sys.stderr,
+    )
+
+
+async def _reconcile() -> int:
+    report = await reconciliation.reconcile()
+    print(f"Ledger total:         {report.ledger_total} (must be 0)")
+    print(f"Unbalanced transfers: {len(report.unbalanced_transfer_ids)}")
+    print(f"Drifted accounts:     {len(report.drifted_account_ids)}")
+    for account_id in report.drifted_account_ids:
+        print(f"  drifted account {account_id}")
+    for transfer_id in report.unbalanced_transfer_ids:
+        print(f"  unbalanced transfer {transfer_id}")
+    print("OK" if report.ok else "DISCREPANCIES FOUND")
+    return 0 if report.ok else 1
+
+
+async def _run(args: argparse.Namespace) -> int:
     try:
         if args.command == "create-api-key":
             await _create_api_key(args.name, [Scope(s) for s in args.scopes])
         elif args.command == "purge-idempotency-keys":
             await _purge_idempotency_keys()
+        elif args.command == "purge-webhook-history":
+            await _purge_webhook_history()
+        elif args.command == "reconcile":
+            return await _reconcile()
+        return 0
     finally:
         await engine.dispose()
 
@@ -59,8 +88,14 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     commands.add_parser("purge-idempotency-keys", help="Delete expired idempotency keys")
+    commands.add_parser(
+        "purge-webhook-history", help="Delete old succeeded deliveries and delivered events"
+    )
+    commands.add_parser(
+        "reconcile", help="Verify ledger invariants (exit code 1 on any discrepancy)"
+    )
 
-    asyncio.run(_run(parser.parse_args(argv)))
+    sys.exit(asyncio.run(_run(parser.parse_args(argv))))
 
 
 if __name__ == "__main__":

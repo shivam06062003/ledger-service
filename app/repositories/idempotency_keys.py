@@ -31,7 +31,7 @@ async def get(session: AsyncSession, *, api_key_id: uuid.UUID, key: str) -> Idem
     stmt = select(IdempotencyKey).where(
         IdempotencyKey.api_key_id == api_key_id, IdempotencyKey.key == key
     )
-    return await session.scalar(stmt)
+    return (await session.scalars(stmt)).one_or_none()
 
 
 async def save_response(

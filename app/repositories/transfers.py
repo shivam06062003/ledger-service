@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import select, tuple_
+from sqlalchemy import literal, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Entry, Transfer
@@ -31,6 +31,9 @@ async def list_entries_for_account(
     """
     stmt = select(Entry).where(Entry.account_id == account_id)
     if before is not None:
-        stmt = stmt.where(tuple_(Entry.created_at, Entry.id) < tuple_(*before))
+        created_at, entry_id = before
+        stmt = stmt.where(
+            tuple_(Entry.created_at, Entry.id) < tuple_(literal(created_at), literal(entry_id))
+        )
     stmt = stmt.order_by(Entry.created_at.desc(), Entry.id.desc()).limit(limit)
     return list((await session.scalars(stmt)).all())

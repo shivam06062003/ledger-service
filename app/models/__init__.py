@@ -5,6 +5,7 @@ from app.models.api_key import ApiKey
 from app.models.base import Base
 from app.models.idempotency_key import IdempotencyKey
 from app.models.outbox import OutboxEvent
+from app.models.scheduled_job import ScheduledJob
 from app.models.transfer import Entry, Transfer
 from app.models.webhook import DeliveryStatus, WebhookDelivery, WebhookEndpoint
 
@@ -16,6 +17,7 @@ __all__ = [
     "Entry",
     "IdempotencyKey",
     "OutboxEvent",
+    "ScheduledJob",
     "Transfer",
     "WebhookDelivery",
     "WebhookEndpoint",

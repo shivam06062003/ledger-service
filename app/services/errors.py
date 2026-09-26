@@ -109,3 +109,11 @@ class InsecureWebhookUrl(DomainError):
 
     def __init__(self) -> None:
         super().__init__("Webhook URLs must use https in production")
+
+
+class RateLimited(DomainError):
+    code = "rate_limited"
+
+    def __init__(self, retry_after_seconds: float) -> None:
+        super().__init__("Too many requests for this API key; retry after the indicated delay")
+        self.retry_after_seconds = retry_after_seconds

@@ -4,6 +4,7 @@ from http import HTTPStatus
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.metrics import TRANSFER_VOLUME, TRANSFERS
 from app.models import Account, Entry, Transfer
 from app.repositories import accounts as accounts_repo
 from app.repositories import transfers as transfers_repo
@@ -50,6 +51,8 @@ async def create_transfer(
         session, idempotency_request, post, status_code=HTTPStatus.CREATED
     )
     if not result.replayed:
+        TRANSFERS.labels(data.currency).inc()
+        TRANSFER_VOLUME.labels(data.currency).inc(data.amount)
         logger.info(
             "transfer_created",
             transfer_id=result.body["id"],

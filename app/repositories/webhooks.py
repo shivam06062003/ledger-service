@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import DeliveryStatus, OutboxEvent, WebhookDelivery, WebhookEndpoint
@@ -60,6 +60,7 @@ class ClaimedDelivery:
     event_type: str
     event_created_at: datetime
     payload: dict[str, Any]
+    trace_context: dict[str, str] | None
 
 
 async def claim_due_deliveries(
@@ -109,6 +110,7 @@ async def claim_due_deliveries(
             OutboxEvent.event_type,
             OutboxEvent.created_at,
             OutboxEvent.payload,
+            OutboxEvent.trace_context,
         )
         .join(WebhookEndpoint, WebhookEndpoint.id == WebhookDelivery.endpoint_id)
         .join(OutboxEvent, OutboxEvent.id == WebhookDelivery.event_id)
@@ -147,3 +149,78 @@ async def mark_attempt_failed(
     await session.execute(
         update(WebhookDelivery).where(WebhookDelivery.id == delivery_id).values(**values)
     )
+
+
+async def delete_succeeded_deliveries_before(
+    session: AsyncSession, cutoff: datetime, *, batch_size: int
+) -> int:
+    """Delete one batch. Batching keeps each transaction (and its locks and WAL
+    volume) small, instead of one huge DELETE that stalls everything else."""
+    batch = (
+        select(WebhookDelivery.id)
+        .where(
+            WebhookDelivery.status == DeliveryStatus.SUCCEEDED,
+            WebhookDelivery.delivered_at < cutoff,
+        )
+        .limit(batch_size)
+    )
+    result = await session.execute(
+        delete(WebhookDelivery)
+        .where(WebhookDelivery.id.in_(batch.scalar_subquery()))
+        .returning(WebhookDelivery.id)
+    )
+    return len(result.all())
+
+
+async def delete_published_events_before(
+    session: AsyncSession, cutoff: datetime, *, batch_size: int
+) -> int:
+    """Only events with no remaining deliveries: an event still referenced by a
+    pending or dead-lettered delivery must stay so it can be (re)sent."""
+    batch = (
+        select(OutboxEvent.id)
+        .where(
+            OutboxEvent.published_at < cutoff,
+            ~exists().where(WebhookDelivery.event_id == OutboxEvent.id),
+        )
+        .limit(batch_size)
+    )
+    result = await session.execute(
+        delete(OutboxEvent)
+        .where(OutboxEvent.id.in_(batch.scalar_subquery()))
+        .returning(OutboxEvent.id)
+    )
+    return len(result.all())
+
+
+@dataclass(frozen=True)
+class QueueStats:
+    outbox_unpublished: int
+    deliveries_pending: int
+    deliveries_dead_lettered: int
+    oldest_pending_age_seconds: float
+
+
+async def queue_stats(session: AsyncSession) -> QueueStats:
+    unpublished = await session.scalar(
+        select(func.count()).select_from(OutboxEvent).where(OutboxEvent.published_at.is_(None))
+    )
+    row = (
+        await session.execute(
+            select(
+                func.count().filter(WebhookDelivery.status == DeliveryStatus.PENDING),
+                func.count().filter(WebhookDelivery.status == DeliveryStatus.FAILED),
+                func.coalesce(
+                    func.extract(
+                        "epoch",
+                        func.now()
+                        - func.min(WebhookDelivery.created_at).filter(
+                            WebhookDelivery.status == DeliveryStatus.PENDING
+                        ),
+                    ),
+                    0,
+                ),
+            )
+        )
+    ).one()
+    return QueueStats(int(unpublished or 0), int(row[0]), int(row[1]), float(row[2]))

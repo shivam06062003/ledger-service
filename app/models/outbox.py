@@ -33,5 +33,8 @@ class OutboxEvent(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     event_type: Mapped[str] = mapped_column(String(64))
     payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    # W3C trace context (traceparent) of the request that produced the event,
+    # so the worker's delivery joins the same distributed trace.
+    trace_context: Mapped[dict[str, str] | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
