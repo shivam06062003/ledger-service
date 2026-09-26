@@ -6,7 +6,21 @@ A payments ledger API built on **double-entry bookkeeping**. Money is never
 created or destroyed, only moved between accounts. Every transfer is atomic,
 and correctness is enforced both in the application and in PostgreSQL itself.
 
-> **Status:** Phase 3 (API hardening) complete. See [Roadmap](#roadmap).
+> **Status:** Phase 4 (events and webhooks) complete. See [Roadmap](#roadmap).
+
+## Architecture
+
+```mermaid
+flowchart LR
+    C[Calling service] -- "POST /v1/transfers<br/>Bearer key + Idempotency-Key" --> API
+    subgraph API[FastAPI]
+        direction TB
+        S[Services]
+    end
+    S -- "ONE transaction:<br/>idempotency key, row locks,<br/>transfer + entries, outbox event" --> DB[(PostgreSQL)]
+    W[Worker<br/>replicas] -- "FOR UPDATE SKIP LOCKED<br/>fan-out + leased deliveries" --> DB
+    W -- "HMAC-signed POST<br/>retries, backoff, DLQ" --> R[Subscriber<br/>webhook endpoint]
+```
 
 ## Highlights
 
@@ -17,6 +31,7 @@ and correctness is enforced both in the application and in PostgreSQL itself.
   - a deferred constraint trigger rejects any transfer whose entries don't sum to zero, checked at `COMMIT`
 - **Safe retries (idempotency keys).** Every transfer requires an `Idempotency-Key`. The key is claimed in the same transaction as the transfer, so 20 identical concurrent requests produce exactly one transfer; the other 19 get the original response replayed. Failed requests leave no trace and can be retried.
 - **Scoped API keys.** Each calling service gets a key with least-privilege scopes. Keys are stored only as SHA-256 hashes, can be revoked instantly, and every transfer records the key that initiated it.
+- **Reliable webhooks (transactional outbox).** Events are written in the same transaction as the transfer, so none are lost and none are sent for rolled-back transfers. A separate worker delivers them with HMAC signatures, exponential backoff with jitter, leases (no transaction held during HTTP calls), and a dead-letter queue with manual re-queue. Workers scale horizontally with `FOR UPDATE SKIP LOCKED`. Tests confirm that removing it causes deadlocks.
 - **Keyset pagination.** Statements page through `(created_at, id)` cursors backed by a matching index, so page 1,000 is as fast as page 1.
 - **Auditable by design:** cached balances for fast reads, immutable entries with `balance_after` for statements, and reconciliation checks that verify the two always agree.
 - **Production basics:** Docker Compose, Alembic migrations with round-trip checks in CI, structured JSON logs with request IDs, liveness and readiness probes, strict typing.
@@ -59,6 +74,20 @@ curl -s "localhost:8000/v1/accounts/$ALICE/entries?limit=20" -H "$AUTH" | jq
 
 In the interactive docs at `/docs`, click **Authorize** and paste the key.
 
+### Try webhooks
+
+```bash
+# Subscribe the bundled example receiver, then start it with the secret
+SECRET=$(curl -s localhost:8000/v1/webhook-endpoints -H "$AUTH" -H 'content-type: application/json' \
+  -d '{"url":"http://webhook-receiver:9000/webhooks/ledger","event_types":["transfer.created"]}' | jq -r .secret)
+WEBHOOK_SECRET=$SECRET docker compose --profile demo up -d webhook-receiver
+
+# Make a transfer (as above), then watch it arrive with a verified signature
+docker compose logs -f webhook-receiver
+```
+
+Stop the receiver (`docker compose stop webhook-receiver`), make another transfer, and watch the worker schedule retries (`make worker-logs`). Start the receiver again and the delivery succeeds on the next attempt.
+
 ### Local development (app outside Docker)
 
 ```bash
@@ -85,6 +114,22 @@ All `/v1` endpoints require `Authorization: Bearer <api key>`.
 | `GET` | `/v1/transfers/{id}` | `transfers:read` | Transfer with its entries and initiating key |
 | `POST` | `/v1/api-keys` | `admin` | Issue a key (secret shown once) |
 | `DELETE` | `/v1/api-keys/{id}` | `admin` | Revoke a key |
+| `POST` | `/v1/webhook-endpoints` | `admin` | Subscribe a URL to event types (signing secret shown once) |
+| `GET` | `/v1/webhook-endpoints` | `admin` | List endpoints |
+| `DELETE` | `/v1/webhook-endpoints/{id}` | `admin` | Disable an endpoint (history kept) |
+| `GET` | `/v1/webhook-deliveries` | `admin` | Delivery log; `?status=failed` is the dead-letter queue |
+| `POST` | `/v1/webhook-deliveries/{id}/retry` | `admin` | Re-queue a dead-lettered delivery |
+
+### Webhook events
+
+Events: `transfer.created` and `account.created`. Each delivery is a `POST` with:
+
+```json
+{"id": "<event id>", "type": "transfer.created", "created_at": "...", "data": { ...the transfer... }}
+```
+
+Headers: `Ledger-Signature: t=<unix>,v1=<hmac>`, `Ledger-Event-Id`, `Ledger-Event-Type`, `Ledger-Delivery-Attempt`.
+Delivery is **at-least-once and unordered**. Receivers must verify the signature against the raw body and deduplicate on the event ID. [`examples/webhook_receiver.py`](examples/webhook_receiver.py) shows how; [`app/webhooks/signing.py`](app/webhooks/signing.py) has no app dependencies and can be copied as-is.
 
 Errors use one consistent format:
 
@@ -102,9 +147,12 @@ app/
   models/         SQLAlchemy ORM tables
   schemas/        Pydantic request/response models
   core/           Config, logging, DB engine/session
+  webhooks/       Outbox relay, delivery dispatcher, HMAC signing
+  worker.py       Background worker process (python -m app.worker)
   cli.py          Operator commands (issue API keys, purge idempotency keys)
 migrations/       Alembic migrations (including hand-written triggers)
-tests/            API, auth, idempotency, concurrency and database-integrity tests
+examples/         Example webhook receiver (signature verification + dedup)
+tests/            API, auth, idempotency, webhook, concurrency and DB-integrity tests
 docs/adr/         Architecture Decision Records
 ```
 
@@ -113,11 +161,12 @@ docs/adr/         Architecture Decision Records
 - [x] **Phase 1: Foundation.** Docker Compose, Alembic, CI, health probes, structured logging.
 - [x] **Phase 2: Core ledger.** Accounts, double-entry transfers, row locking, database-enforced invariants, concurrency tests.
 - [x] **Phase 3: API hardening.** Idempotency keys, API-key auth with scopes, cursor pagination.
-- [ ] **Phase 4: Events.** Transactional outbox, relay worker, signed webhooks with retries and a dead-letter queue.
-- [ ] **Phase 5: Operability.** Prometheus metrics, OpenTelemetry tracing, rate limiting, load tests, scheduled reconciliation.
+- [x] **Phase 4: Events.** Transactional outbox, relay worker, signed webhooks with retries and a dead-letter queue.
+- [ ] **Phase 5: Operability.** Prometheus metrics, OpenTelemetry tracing, rate limiting, load tests, scheduled reconciliation and retention jobs.
 
 ## Design decisions
 
 - [ADR 0001: Foundation stack](docs/adr/0001-foundation-stack.md)
 - [ADR 0002: Ledger model and concurrency control](docs/adr/0002-ledger-model-and-concurrency.md)
 - [ADR 0003: API keys, idempotency and pagination](docs/adr/0003-api-keys-idempotency-pagination.md)
+- [ADR 0004: Transactional outbox and webhook delivery](docs/adr/0004-outbox-and-webhooks.md)

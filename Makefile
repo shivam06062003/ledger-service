@@ -1,4 +1,4 @@
-.PHONY: install up down logs db migrate revision api-key purge-idempotency test lint format typecheck check
+.PHONY: install up down logs db migrate revision api-key purge-idempotency test lint format typecheck check worker-logs
 
 install:        ## Create venv and install app + dev tools
 	python3.13 -m venv .venv
@@ -43,3 +43,6 @@ typecheck:
 	.venv/bin/mypy app
 
 check: lint typecheck test   ## Everything CI runs
+
+worker-logs:    ## Tail webhook worker logs
+	docker compose logs -f worker

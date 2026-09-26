@@ -25,6 +25,18 @@ class Settings(BaseSettings):
     # How long a stored Idempotency-Key response is kept for replay.
     idempotency_key_retention_hours: int = 24
 
+    # Webhook delivery (worker process)
+    webhook_timeout_seconds: float = 10.0
+    webhook_max_attempts: int = 10
+    webhook_backoff_base_seconds: float = 10.0
+    webhook_backoff_cap_seconds: float = 3600.0
+    # How long a claimed delivery is hidden from other workers. Must exceed the
+    # HTTP timeout, or a slow delivery could be picked up twice.
+    webhook_lease_seconds: int = 60
+    worker_batch_size: int = 50
+    worker_poll_interval_seconds: float = 1.0
+    worker_heartbeat_path: str = "/tmp/worker-heartbeat"
+
 
 @lru_cache
 def get_settings() -> Settings:

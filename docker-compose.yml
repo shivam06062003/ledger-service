@@ -33,12 +33,49 @@ services:
 
   api:
     build: .
+    restart: unless-stopped
     environment: *app-env
     ports:
       - "8000:8000"
     depends_on:
       migrate:
         condition: service_completed_successfully
+
+  # Relays the outbox and delivers webhooks. Scale with
+  # `docker compose up -d --scale worker=3`; replicas never duplicate work.
+  worker:
+    build: .
+    command: ["python", "-m", "app.worker"]
+    restart: unless-stopped
+    environment: *app-env
+    # The API's HTTP health check doesn't apply here. Instead: "has the loop
+    # touched its heartbeat file in the last 30 seconds?"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os, sys, time; sys.exit(time.time() - os.path.getmtime('/tmp/worker-heartbeat') > 30)"
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  # Demo only (not started by default): an example subscriber that verifies
+  # signatures. Start with: WEBHOOK_SECRET=whsec_... docker compose --profile demo up -d
+  webhook-receiver:
+    profiles: [demo]
+    build: .
+    command: ["uvicorn", "examples.webhook_receiver:app", "--host", "0.0.0.0", "--port", "9000"]
+    environment:
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
+    volumes:
+      - ./examples:/app/examples:ro
+    healthcheck:
+      disable: true
 
 volumes:
   pgdata:

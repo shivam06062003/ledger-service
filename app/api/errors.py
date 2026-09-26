@@ -19,14 +19,18 @@ from app.services.errors import (
     AccountNotFound,
     ApiKeyNotFound,
     CurrencyMismatch,
+    DeliveryNotRetryable,
     DomainError,
     IdempotencyKeyReused,
+    InsecureWebhookUrl,
     InsufficientFunds,
     InvalidCursor,
     PermissionDenied,
     SameAccountTransfer,
     TransferNotFound,
     Unauthenticated,
+    WebhookDeliveryNotFound,
+    WebhookEndpointNotFound,
 )
 
 _STATUS_BY_ERROR: dict[type[DomainError], int] = {
@@ -40,6 +44,10 @@ _STATUS_BY_ERROR: dict[type[DomainError], int] = {
     PermissionDenied: status.HTTP_403_FORBIDDEN,
     IdempotencyKeyReused: status.HTTP_422_UNPROCESSABLE_CONTENT,
     InvalidCursor: status.HTTP_422_UNPROCESSABLE_CONTENT,
+    WebhookEndpointNotFound: status.HTTP_404_NOT_FOUND,
+    WebhookDeliveryNotFound: status.HTTP_404_NOT_FOUND,
+    DeliveryNotRetryable: status.HTTP_409_CONFLICT,
+    InsecureWebhookUrl: status.HTTP_422_UNPROCESSABLE_CONTENT,
 }
 
 

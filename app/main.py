@@ -6,7 +6,7 @@ from fastapi import FastAPI
 
 from app.api.errors import register_error_handlers
 from app.api.middleware import request_context_middleware
-from app.api.routes import accounts, api_keys, health, transfers
+from app.api.routes import accounts, api_keys, health, transfers, webhooks
 from app.core.config import get_settings
 from app.core.db import engine
 from app.core.logging import configure_logging
@@ -34,6 +34,8 @@ def create_app() -> FastAPI:
     app.include_router(accounts.router)
     app.include_router(transfers.router)
     app.include_router(api_keys.router)
+    app.include_router(webhooks.endpoints_router)
+    app.include_router(webhooks.deliveries_router)
     return app
 
 

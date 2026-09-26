@@ -7,8 +7,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import Account, Entry, Transfer
 from app.repositories import accounts as accounts_repo
 from app.repositories import transfers as transfers_repo
+from app.schemas.events import EventType
 from app.schemas.transfer import TransferCreate, TransferRead
-from app.services import idempotency
+from app.services import events, idempotency
 from app.services.errors import (
     AccountNotFound,
     CurrencyMismatch,
@@ -32,14 +33,18 @@ async def create_transfer(
 
     Everything happens in one database transaction: claim the idempotency key,
     lock both accounts, validate, update cached balances, write the transfer
-    and its two entries, record the response. Any error rolls the whole thing
+    and its two entries, add a transfer.created event to the outbox, record the
+    response. Any error rolls the whole thing
     back, so there is never a half-applied transfer.
     """
     if data.source_account_id == data.destination_account_id:
         raise SameAccountTransfer()
 
     async def post() -> TransferRead:
-        return TransferRead.model_validate(await _post_transfer(session, data, initiated_by))
+        transfer = TransferRead.model_validate(await _post_transfer(session, data, initiated_by))
+        # Same transaction as the transfer: the event exists iff the transfer does.
+        events.record(session, EventType.TRANSFER_CREATED, transfer)
+        return transfer
 
     result = await idempotency.execute(
         session, idempotency_request, post, status_code=HTTPStatus.CREATED

@@ -64,7 +64,10 @@ async def clean_tables() -> None:
     # only), which is exactly what a test reset needs.
     async with engine.begin() as conn:
         await conn.execute(
-            text("TRUNCATE idempotency_keys, entries, transfers, accounts, api_keys")
+            text(
+                "TRUNCATE webhook_deliveries, webhook_endpoints, outbox_events, "
+                "idempotency_keys, entries, transfers, accounts, api_keys"
+            )
         )
 
 

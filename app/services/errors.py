@@ -79,3 +79,33 @@ class InvalidCursor(DomainError):
 
     def __init__(self) -> None:
         super().__init__("The pagination cursor is malformed")
+
+
+class WebhookEndpointNotFound(DomainError):
+    code = "webhook_endpoint_not_found"
+
+    def __init__(self, endpoint_id: uuid.UUID) -> None:
+        super().__init__(f"Webhook endpoint {endpoint_id} not found")
+
+
+class WebhookDeliveryNotFound(DomainError):
+    code = "webhook_delivery_not_found"
+
+    def __init__(self, delivery_id: uuid.UUID) -> None:
+        super().__init__(f"Webhook delivery {delivery_id} not found")
+
+
+class DeliveryNotRetryable(DomainError):
+    code = "delivery_not_retryable"
+
+    def __init__(self, delivery_id: uuid.UUID, status: str) -> None:
+        super().__init__(
+            f"Delivery {delivery_id} is '{status}'; only failed deliveries can be retried"
+        )
+
+
+class InsecureWebhookUrl(DomainError):
+    code = "insecure_webhook_url"
+
+    def __init__(self) -> None:
+        super().__init__("Webhook URLs must use https in production")

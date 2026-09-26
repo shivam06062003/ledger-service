@@ -8,8 +8,9 @@ from app.repositories import accounts as accounts_repo
 from app.repositories import transfers as transfers_repo
 from app.schemas.account import AccountCreate, AccountRead
 from app.schemas.common import Page
+from app.schemas.events import EventType
 from app.schemas.transfer import EntryRead
-from app.services import idempotency
+from app.services import events, idempotency
 from app.services.errors import AccountNotFound
 from app.services.idempotency import IdempotencyRequest, IdempotentResult
 from app.services.pagination import decode_cursor, encode_cursor
@@ -22,7 +23,9 @@ async def create_account(
         account = Account(**data.model_dump())
         accounts_repo.add(session, account)
         await session.flush()  # INSERT now, so server defaults (created_at) are populated
-        return AccountRead.model_validate(account)
+        created = AccountRead.model_validate(account)
+        events.record(session, EventType.ACCOUNT_CREATED, created)
+        return created
 
     return await idempotency.execute(
         session, idempotency_request, create, status_code=HTTPStatus.CREATED
