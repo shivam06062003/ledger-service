@@ -32,5 +32,6 @@ class TransferRead(BaseModel):
     amount: int
     currency: str
     description: str | None
+    initiated_by_api_key_id: uuid.UUID | None
     created_at: datetime
     entries: list[EntryRead]

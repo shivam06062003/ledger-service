@@ -17,11 +17,16 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.services.errors import (
     AccountNotFound,
+    ApiKeyNotFound,
     CurrencyMismatch,
     DomainError,
+    IdempotencyKeyReused,
     InsufficientFunds,
+    InvalidCursor,
+    PermissionDenied,
     SameAccountTransfer,
     TransferNotFound,
+    Unauthenticated,
 )
 
 _STATUS_BY_ERROR: dict[type[DomainError], int] = {
@@ -30,6 +35,11 @@ _STATUS_BY_ERROR: dict[type[DomainError], int] = {
     InsufficientFunds: status.HTTP_422_UNPROCESSABLE_CONTENT,
     CurrencyMismatch: status.HTTP_422_UNPROCESSABLE_CONTENT,
     SameAccountTransfer: status.HTTP_422_UNPROCESSABLE_CONTENT,
+    ApiKeyNotFound: status.HTTP_404_NOT_FOUND,
+    Unauthenticated: status.HTTP_401_UNAUTHORIZED,
+    PermissionDenied: status.HTTP_403_FORBIDDEN,
+    IdempotencyKeyReused: status.HTTP_422_UNPROCESSABLE_CONTENT,
+    InvalidCursor: status.HTTP_422_UNPROCESSABLE_CONTENT,
 }
 
 
@@ -49,7 +59,9 @@ def error_response(
 async def _domain_error_handler(request: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, DomainError)
     status_code = _STATUS_BY_ERROR.get(type(exc), status.HTTP_400_BAD_REQUEST)
-    return error_response(status_code, exc.code, exc.message)
+    # RFC 9110: a 401 must tell the client which auth scheme to use.
+    headers = {"WWW-Authenticate": "Bearer"} if isinstance(exc, Unauthenticated) else None
+    return error_response(status_code, exc.code, exc.message, headers=headers)
 
 
 async def _validation_error_handler(request: Request, exc: Exception) -> JSONResponse:

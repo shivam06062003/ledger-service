@@ -29,6 +29,8 @@ class Transfer(Base):
     amount: Mapped[int] = mapped_column(BigInteger)
     currency: Mapped[str] = mapped_column(String(3))
     description: Mapped[str | None] = mapped_column(String(255))
+    # Audit trail: which calling service moved this money.
+    initiated_by_api_key_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("api_keys.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # selectin: entries are loaded with the transfer in one extra query. Lazy
@@ -48,8 +50,10 @@ class Entry(Base):
     __tablename__ = "entries"
     __table_args__ = (
         CheckConstraint("amount <> 0", name="non_zero_amount"),
-        # Serves account statements: "entries for account X, newest first".
-        Index("ix_entries_account_id_created_at", "account_id", "created_at"),
+        # Serves paginated account statements: "entries for account X, newest
+        # first, after cursor (created_at, id)". id breaks ties between entries
+        # written in the same transaction, which share a created_at.
+        Index("ix_entries_account_id_created_at_id", "account_id", "created_at", "id"),
     )
     __mapper_args__ = {"eager_defaults": True}  # noqa: RUF012
 

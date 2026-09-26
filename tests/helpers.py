@@ -1,5 +1,6 @@
 """Test helpers that drive the public API, plus ledger invariant checks."""
 
+import uuid
 from typing import Any
 
 from httpx import AsyncClient
@@ -30,9 +31,12 @@ async def transfer(
     destination_id: str,
     amount: int,
     currency: str = "INR",
+    *,
+    idempotency_key: str | None = None,
 ) -> Any:
     return await client.post(
         "/v1/transfers",
+        headers={"Idempotency-Key": idempotency_key or str(uuid.uuid4())},
         json={
             "source_account_id": source_id,
             "destination_account_id": destination_id,

@@ -47,3 +47,35 @@ class SameAccountTransfer(DomainError):
 
     def __init__(self) -> None:
         super().__init__("Source and destination accounts must differ")
+
+
+class ApiKeyNotFound(DomainError):
+    code = "api_key_not_found"
+
+    def __init__(self, api_key_id: uuid.UUID) -> None:
+        super().__init__(f"API key {api_key_id} not found")
+
+
+class Unauthenticated(DomainError):
+    code = "unauthenticated"
+
+
+class PermissionDenied(DomainError):
+    code = "insufficient_scope"
+
+
+class IdempotencyKeyReused(DomainError):
+    code = "idempotency_key_reused"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "This Idempotency-Key was already used with a different request. "
+            "Use a new key for a new request."
+        )
+
+
+class InvalidCursor(DomainError):
+    code = "invalid_cursor"
+
+    def __init__(self) -> None:
+        super().__init__("The pagination cursor is malformed")

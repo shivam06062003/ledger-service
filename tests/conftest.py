@@ -1,6 +1,7 @@
 import asyncio
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AsyncExitStack
 from pathlib import Path
 
 import pytest
@@ -20,8 +21,10 @@ from httpx import ASGITransport, AsyncClient  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 from sqlalchemy.engine import make_url  # noqa: E402
 
-from app.core.db import engine  # noqa: E402
+from app.core.db import SessionLocal, engine  # noqa: E402
 from app.main import app  # noqa: E402
+from app.schemas.api_key import ApiKeyCreate, Scope  # noqa: E402
+from app.services import api_keys as api_key_service  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -60,12 +63,44 @@ async def clean_tables() -> None:
     # TRUNCATE bypasses the append-only row triggers (they fire on UPDATE/DELETE
     # only), which is exactly what a test reset needs.
     async with engine.begin() as conn:
-        await conn.execute(text("TRUNCATE entries, transfers, accounts"))
+        await conn.execute(
+            text("TRUNCATE idempotency_keys, entries, transfers, accounts, api_keys")
+        )
+
+
+async def issue_api_key(*scopes: Scope) -> str:
+    async with SessionLocal() as session:
+        created = await api_key_service.create_api_key(
+            session, ApiKeyCreate(name="test", scopes=list(scopes))
+        )
+    return created.key
+
+
+ClientFactory = Callable[..., Awaitable[AsyncClient]]
 
 
 @pytest.fixture
-async def client() -> AsyncIterator[AsyncClient]:
-    """An HTTP client that calls the app in-process — no server or network needed."""
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        yield c
+async def make_client() -> AsyncIterator[ClientFactory]:
+    """Build in-process HTTP clients (no server or network needed).
+
+    make_client(Scope.ACCOUNTS_READ) -> client authenticated with those scopes
+    make_client()                    -> unauthenticated client
+    """
+    async with AsyncExitStack() as stack:
+
+        async def factory(*scopes: Scope) -> AsyncClient:
+            headers = {"Authorization": f"Bearer {await issue_api_key(*scopes)}"} if scopes else {}
+            return await stack.enter_async_context(
+                AsyncClient(
+                    transport=ASGITransport(app=app), base_url="http://test", headers=headers
+                )
+            )
+
+        yield factory
     app.dependency_overrides.clear()
+
+
+@pytest.fixture
+async def client(make_client: ClientFactory) -> AsyncClient:
+    """Admin client: most tests exercise ledger behaviour, not permissions."""
+    return await make_client(Scope.ADMIN)

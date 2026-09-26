@@ -56,7 +56,7 @@ async def test_insufficient_funds_changes_nothing(client: AsyncClient) -> None:
     assert response.json()["error"]["code"] == "insufficient_funds"
     assert await get_balance(client, alice["id"]) == 100
     assert await get_balance(client, bob["id"]) == 0
-    entries = (await client.get(f"/v1/accounts/{bob['id']}/entries")).json()
+    entries = (await client.get(f"/v1/accounts/{bob['id']}/entries")).json()["data"]
     assert entries == []
 
 

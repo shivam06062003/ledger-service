@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     db_pool_size: int = 5
     db_max_overflow: int = 10
 
+    # How long a stored Idempotency-Key response is kept for replay.
+    idempotency_key_retention_hours: int = 24
+
 
 @lru_cache
 def get_settings() -> Settings:

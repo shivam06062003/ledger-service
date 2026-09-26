@@ -48,7 +48,7 @@ async def test_entries_are_listed_newest_first_with_running_balance(client: Asyn
     response = await client.get(f"/v1/accounts/{alice['id']}/entries")
 
     assert response.status_code == 200
-    entries = response.json()
+    entries = response.json()["data"]
     assert [(e["amount"], e["balance_after"]) for e in entries] == [
         (-200, 500),
         (-300, 700),

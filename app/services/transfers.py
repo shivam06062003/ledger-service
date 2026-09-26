@@ -1,4 +1,5 @@
 import uuid
+from http import HTTPStatus
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -6,7 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import Account, Entry, Transfer
 from app.repositories import accounts as accounts_repo
 from app.repositories import transfers as transfers_repo
-from app.schemas.transfer import TransferCreate
+from app.schemas.transfer import TransferCreate, TransferRead
+from app.services import idempotency
 from app.services.errors import (
     AccountNotFound,
     CurrencyMismatch,
@@ -14,72 +16,94 @@ from app.services.errors import (
     SameAccountTransfer,
     TransferNotFound,
 )
+from app.services.idempotency import IdempotencyRequest, IdempotentResult
 
 logger = structlog.get_logger()
 
 
-async def create_transfer(session: AsyncSession, data: TransferCreate) -> Transfer:
-    """Move money between two accounts atomically.
+async def create_transfer(
+    session: AsyncSession,
+    data: TransferCreate,
+    *,
+    initiated_by: uuid.UUID,
+    idempotency_request: IdempotencyRequest,
+) -> IdempotentResult:
+    """Move money between two accounts atomically and at most once.
 
-    Everything happens in one database transaction: lock both accounts, validate,
-    update cached balances, write the transfer and its two entries. Any error
-    rolls the whole thing back, so there is never a half-applied transfer.
+    Everything happens in one database transaction: claim the idempotency key,
+    lock both accounts, validate, update cached balances, write the transfer
+    and its two entries, record the response. Any error rolls the whole thing
+    back, so there is never a half-applied transfer.
     """
     if data.source_account_id == data.destination_account_id:
         raise SameAccountTransfer()
 
-    async with session.begin():
-        locked = {
-            account.id: account
-            for account in await accounts_repo.lock_many(
-                session, [data.source_account_id, data.destination_account_id]
-            )
-        }
-        source = _require(locked, data.source_account_id)
-        destination = _require(locked, data.destination_account_id)
+    async def post() -> TransferRead:
+        return TransferRead.model_validate(await _post_transfer(session, data, initiated_by))
 
-        for account in (source, destination):
-            if account.currency != data.currency:
-                raise CurrencyMismatch(account.id, account.currency, data.currency)
-
-        # Safe to check-then-act: we hold the row lock, so no concurrent
-        # transfer can change this balance until we commit.
-        if not source.allow_negative_balance and source.balance < data.amount:
-            raise InsufficientFunds(source.id)
-
-        source.balance -= data.amount
-        destination.balance += data.amount
-
-        transfer = Transfer(
+    result = await idempotency.execute(
+        session, idempotency_request, post, status_code=HTTPStatus.CREATED
+    )
+    if not result.replayed:
+        logger.info(
+            "transfer_created",
+            transfer_id=result.body["id"],
+            source_account_id=str(data.source_account_id),
+            destination_account_id=str(data.destination_account_id),
             amount=data.amount,
             currency=data.currency,
-            description=data.description,
-            entries=[
-                Entry(account_id=source.id, amount=-data.amount, balance_after=source.balance),
-                Entry(
-                    account_id=destination.id,
-                    amount=data.amount,
-                    balance_after=destination.balance,
-                ),
-            ],
         )
-        transfers_repo.add(session, transfer)
-
-    logger.info(
-        "transfer_created",
-        transfer_id=str(transfer.id),
-        source_account_id=str(source.id),
-        destination_account_id=str(destination.id),
-        amount=data.amount,
-        currency=data.currency,
-    )
-    return transfer
+    return result
 
 
 async def get_transfer(session: AsyncSession, transfer_id: uuid.UUID) -> Transfer:
     transfer = await transfers_repo.get(session, transfer_id)
     if transfer is None:
         raise TransferNotFound(transfer_id)
+    return transfer
+
+
+async def _post_transfer(
+    session: AsyncSession, data: TransferCreate, initiated_by: uuid.UUID
+) -> Transfer:
+    """Must run inside a transaction (the caller owns it)."""
+    locked = {
+        account.id: account
+        for account in await accounts_repo.lock_many(
+            session, [data.source_account_id, data.destination_account_id]
+        )
+    }
+    source = _require(locked, data.source_account_id)
+    destination = _require(locked, data.destination_account_id)
+
+    for account in (source, destination):
+        if account.currency != data.currency:
+            raise CurrencyMismatch(account.id, account.currency, data.currency)
+
+    # Safe to check-then-act: we hold the row lock, so no concurrent
+    # transfer can change this balance until we commit.
+    if not source.allow_negative_balance and source.balance < data.amount:
+        raise InsufficientFunds(source.id)
+
+    source.balance -= data.amount
+    destination.balance += data.amount
+
+    transfer = Transfer(
+        amount=data.amount,
+        currency=data.currency,
+        description=data.description,
+        initiated_by_api_key_id=initiated_by,
+        entries=[
+            Entry(account_id=source.id, amount=-data.amount, balance_after=source.balance),
+            Entry(
+                account_id=destination.id,
+                amount=data.amount,
+                balance_after=destination.balance,
+            ),
+        ],
+    )
+    transfers_repo.add(session, transfer)
+    await session.flush()  # INSERT now, so ids and created_at are populated
     return transfer
 
 
