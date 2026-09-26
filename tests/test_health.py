@@ -34,7 +34,9 @@ async def test_ready_returns_503_when_database_is_down(client: AsyncClient) -> N
     response = await client.get("/health/ready")
 
     assert response.status_code == 503
-    assert response.json() == {"detail": "database unavailable"}
+    assert response.json() == {
+        "error": {"code": "service_unavailable", "message": "database unavailable"}
+    }
 
 
 async def test_generates_request_id_when_missing(client: AsyncClient) -> None:

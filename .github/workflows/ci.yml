@@ -48,7 +48,8 @@ jobs:
           python-version: "3.13"
           cache: pip
       - run: pip install -e ".[dev]"
-      - run: alembic upgrade head
+      - name: Migrations round-trip (upgrade, downgrade, upgrade)
+        run: alembic upgrade head && alembic downgrade base && alembic upgrade head
       - run: pytest -v
 
   docker:

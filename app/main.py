@@ -4,8 +4,9 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import FastAPI
 
+from app.api.errors import register_error_handlers
 from app.api.middleware import request_context_middleware
-from app.api.routes import health
+from app.api.routes import accounts, health, transfers
 from app.core.config import get_settings
 from app.core.db import engine
 from app.core.logging import configure_logging
@@ -28,7 +29,10 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
     app.middleware("http")(request_context_middleware)
+    register_error_handlers(app)
     app.include_router(health.router)
+    app.include_router(accounts.router)
+    app.include_router(transfers.router)
     return app
 
 
